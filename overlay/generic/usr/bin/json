@@ -5,10 +5,12 @@
 // See <https://github.com/trentm/json>.
 //
 
-var VERSION = "5.1.1";
+var VERSION = "6.0.0";
 
+var p = console.warn;
 var util = require('util');
-var pathlib = require('path');
+var assert = require('assert');
+var path = require('path');
 var vm = require('vm');
 var fs = require('fs');
 var warn = console.warn;
@@ -24,7 +26,7 @@ exports.parseLookup = parseLookup;
 
 // As an exported API, these are still experimental:
 exports.lookupDatum = lookupDatum;
-exports.printDatum = printDatum;
+exports.printDatum = printDatum;  // DEPRECATED
 
 
 
@@ -132,13 +134,14 @@ function printHelp() {
   util.puts("Roughly in order of processing, features are:");
   util.puts("");
   util.puts("Grouping:");
-  util.puts("  Use '-g' or '--group' to group objects or arrays separated ");
-  util.puts("  by no space or by a newline. This can be helpful for, e.g.: ");
+  util.puts("  Use '-g' or '--group' to group adjacent objects, separated by");
+  util.puts("  by no space or a by a newline, or adjacent arrays, separate by");
+  util.puts("  by a newline. This can be helpful for, e.g.: ");
   util.puts("     $ cat *.json | json -g ... ");
   util.puts("  and similar.");
   util.puts("");
   util.puts("Execution:");
-  util.puts("  Use the '-e CODE' option to execute code on the input JSON.");
+  util.puts("  Use the '-e CODE' option to execute JavaScript code on the input JSON.");
   util.puts("     $ echo '{\"name\":\"trent\",\"age\":38}' | json -e 'age++'");
   util.puts("     {");
   util.puts("       \"name\": \"trent\",");
@@ -152,7 +155,7 @@ function printHelp() {
   util.puts("     $ echo '[{\"age\":38},{\"age\":4}]' | json -c 'age>21'");
   util.puts("     [{\"age\":38}]");
   util.puts("  If input is an array, this will automatically process each");
-  util.puts("  item separately.");
+  util.puts("  item separately. Note: 'CODE' is JavaScript code.");
   util.puts("");
   util.puts("Lookups:");
   util.puts("  Use lookup arguments to extract particular values:");
@@ -167,6 +170,11 @@ function printHelp() {
   util.puts("              {\"name\":\"ewan\",\"age\":4}]' | json -a name age");
   util.puts("     trent 38");
   util.puts("     ewan 4");
+  util.puts("");
+  util.puts("In-place editing:");
+  util.puts("  Use '-I, --in-place' to edit a file in place:");
+  util.puts("     $ json -I -f config.json  # reformat");
+  util.puts("     $ json -I -f config.json -c 'this.logLevel=\"debug\"' # add field");
   util.puts("");
   util.puts("Pretty-printing:");
   util.puts("  Output is 'jsony' by default: 2-space indented JSON, except a");
@@ -190,6 +198,9 @@ function printHelp() {
   util.puts("");
   util.puts("  -f FILE       Path to a file to process. If not given, then");
   util.puts("                stdin is used.");
+  util.puts("  -I, --in-place  In-place edit of the file given with '-f'.");
+  util.puts("                Lookups are not allow with in-place editing");
+  util.puts("                because it makes it too easy to lose content.");
   util.puts("");
   util.puts("  -H            Drop any HTTP header block (as from `curl -i ...`).");
   util.puts("  -g, --group   Group adjacent objects or arrays into an array.");
@@ -206,16 +217,16 @@ function printHelp() {
   util.puts("  -D DELIM      Delimiter char between lookups (default is '.'). E.g.:");
   util.puts("                  $ echo '{\"a.b\": {\"b\": 1}}' | json -D / a.b/b");
   util.puts("");
-  util.puts("  -e CODE       Execute the given code on the input. If input is an");
-  util.puts("                array, then each item of the array is processed");
+  util.puts("  -e CODE       Execute the given JavaScript code on the input. If input");
+  util.puts("                is an array, then each item of the array is processed");
   util.puts("                separately (use '-A' to override).");
-  util.puts("  -c CODE       Filter the input with `CODE`. If `CODE` returns");
-  util.puts("                false-y, then the item is filtered out. If input");
-  util.puts("                is an array, then each item of the array is ");
+  util.puts("  -c CODE       Filter the input with JavaScript `CODE`. If `CODE`");
+  util.puts("                returns false-y, then the item is filtered out. If");
+  util.puts("                input is an array, then each item of the array is ");
   util.puts("                processed separately (use '-A' to override).");
   util.puts("");
   util.puts("  -k, --keys    Output the input object's keys.");
-  util.puts("  --validate    Just validate the input (no processing or output).");
+  util.puts("  -n, --validate  Just validate the input (no processing or output).");
   util.puts("                Use with '-q' for silent validation (exit status).");
   util.puts("");
   util.puts("  -o, --output MODE   Specify an output mode. One of");
@@ -260,7 +271,8 @@ function parseArgv(argv) {
     group: false,
     merge: null,    // --merge -> "shallow", --deep-merge -> "deep"
     inputFiles: [],
-    validate: false
+    validate: false,
+    inPlace: false
   };
 
   // Turn '-iH' into '-i -H', except for argument-accepting options.
@@ -268,6 +280,10 @@ function parseArgv(argv) {
   var newArgs = [];
   var optTakesArg = {'d': true, 'o': true, 'D': true};
   for (var i = 0; i < args.length; i++) {
+    if (args[i] === '--') {
+      newArgs = newArgs.concat(args.slice(i));
+      break;
+    }
     if (args[i].charAt(0) === "-" && args[i].charAt(1) !== '-' && args[i].length > 2) {
       var splitOpts = args[i].slice(1).split("");
       for (var j = 0; j < splitOpts.length; j++) {
@@ -326,6 +342,10 @@ function parseArgv(argv) {
           throw new Error("unknown output mode: '"+name+"'");
         }
         break;
+      case "-I":
+      case "--in-place":
+        parsed.inPlace = true;
+        break;
       case "-i": // output with util.inspect
         parsed.outputMode = OM_INSPECT;
         break;
@@ -373,6 +393,7 @@ function parseArgv(argv) {
       case "-f":
         parsed.inputFiles.push(args.shift());
         break;
+      case "-n":
       case "--validate":
         parsed.validate = true;
         break;
@@ -390,6 +411,14 @@ function parseArgv(argv) {
   }
   if (parsed.outputKeys && parsed.args.length > 0) {
     throw new Error("cannot use -k|--keys option and lookup arguments together");
+  }
+  if (parsed.inPlace && parsed.inputFiles.length !== 1) {
+    throw new Error("must specify exactly one file with '-f FILE' to "
+      + "use -I/--in-place");
+  }
+  if (parsed.inPlace && parsed.args.length > 0) {
+    throw new Error("lookups cannot be specified with in-place editing "
+      + "(-I/--in-place), too easy to lose content");
   }
 
   return parsed;
@@ -441,12 +470,12 @@ function chunkEmitter(opts) {
       }
       break;
     }
-    //console.warn("XXX stripHeaders done, finishedHeaders=%s", finishedHeaders)
+    //console.warn("stripHeaders done, finishedHeaders=%s", finishedHeaders)
     return s;
   }
 
   function emitChunks(block, emitter) {
-    //console.warn("XXX emitChunks start: block='%s'", block)
+    //console.warn("emitChunks start: block='%s'", block)
     var splitter = /(})(\s*\n\s*)?({\s*")/;
     var leftTrimmedBlock = block.trimLeft();
     if (leftTrimmedBlock && leftTrimmedBlock[0] !== '{') {
@@ -468,7 +497,7 @@ function chunkEmitter(opts) {
      *   'a":"b"}' ]
      */
     var bits = block.split(splitter);
-    //console.warn("XXX emitChunks: bits (length %d): %j", bits.length, bits);
+    //console.warn("emitChunks: bits (length %d): %j", bits.length, bits);
     if (bits.length === 1) {
       /*
        * An unwanted side-effect of using a regex to find newline-separated
@@ -597,11 +626,15 @@ function chunkEmitter(opts) {
 }
 
 /**
- * Get input from either given file paths or stdin.
+ * Get input from either given file paths or stdin. If `opts.inPlace` then
+ * this calls the callback once for each `opts.inputFiles`.
  *
  * @param opts {Object} Parsed options.
- * @param callback {Function} `function (err, callback)` where err is an
- *    error string if there was a problem.
+ * @param callback {Function} `function (err, content, filename)` where err
+ *    is an error string if there was a problem, `content` is the read
+ *    content and `filename` is the associated file name from which content
+ *    was loaded if applicable. `filename` is only included when
+ *    `opts.inPlace`.
  */
 function getInput(opts, callback) {
   if (opts.inputFiles.length === 0) {
@@ -617,6 +650,19 @@ function getInput(opts, callback) {
     stdin.on('end', function () {
       callback(null, chunks.join(''));
     });
+  } else if (opts.inPlace) {
+    for (var i = 0; i < opts.inputFiles.length; i++) {
+      var file = opts.inputFiles[i];
+      var content;
+      try {
+        content = fs.readFileSync(file, 'utf8');
+      } catch (e) {
+        callback(e, null, file);
+      }
+      if (content) {
+        callback(null, content, file);
+      }
+    }
   } else {
     // Read input files.
     var i = 0;
@@ -773,32 +819,40 @@ function parseInput(buffer, obj, group, merge) {
   if (obj) {
     return {datum: obj};
   } else if (group) {
-    // Special case: Grouping (previously called auto-arrayification)
-    // of unjoined list of objects:
-    //    {"one": 1}{"two": 2}
-    // and auto-concatenation of unjoined list of arrays:
-    //    ["a", "b"]["c", "d"]
-    //
-    // This can be nice to process a stream of JSON objects generated from
-    // multiple calls to another tool or `cat *.json | json`.
-    //
-    // Rules:
-    // - Only JS objects and arrays. Don't see strong need for basic
-    //   JS types right now and this limitation simplifies.
-    // - The break between JS objects has to include a newline:
-    //      {"one": 1}
-    //      {"two": 2}
-    //   or no spaces at all:
-    //      {"one": 1}{"two": 2}
-    //   I.e., not this:
-    //      {"one": 1}  {"two": 2}
-    //   This condition should be fine for typical use cases and ensures
-    //   no false matches inside JS strings.
+    /**
+     * Special case: Grouping (previously called auto-arrayification)
+     * of unjoined list of objects:
+     *    {"one": 1}{"two": 2}
+     * and auto-concatenation of unjoined list of arrays:
+     *    ["a", "b"]["c", "d"]
+     *
+     * This can be nice to process a stream of JSON objects generated from
+     * multiple calls to another tool or `cat *.json | json`.
+     *
+     * Rules:
+     * - Only JS objects and arrays. Don't see strong need for basic
+     *   JS types right now and this limitation simplifies.
+     * - The break between JS objects has to include a newline:
+     *      {"one": 1}
+     *      {"two": 2}
+     *   or no spaces at all:
+     *      {"one": 1}{"two": 2}
+     *   I.e., not this:
+     *      {"one": 1}  {"two": 2}
+     *   This condition should be fine for typical use cases and ensures
+     *   no false matches inside JS strings.
+     * - The break between JS *arrays* has to include a newline:
+     *      ["one", "two"]
+     *      ["three"]
+     *   The "no spaces" case is NOT supported for JS arrays as of v6.0.0
+     *   because <https://github.com/trentm/json/issues/55> shows that that
+     *   is not safe.
+     */
     var newBuffer = buffer;
     [/(})\s*\n\s*({)/g, /(})({")/g].forEach(function (pat) {
       newBuffer = newBuffer.replace(pat, "$1,\n$2");
     });
-    [/(\])\s*\n\s*(\[)/g, /(\])(\[)/g].forEach(function (pat) {
+    [/(\])\s*\n\s*(\[)/g].forEach(function (pat) {
       newBuffer = newBuffer.replace(pat, ",\n");
     });
     newBuffer = newBuffer.trim();
@@ -907,15 +961,61 @@ function lookupDatum(datum, lookup) {
 }
 
 
+/**
+ * Output the given datasets.
+ *
+ * @param datasets {Array} Array of data sets to print, in the form:
+ *    `[ [<datum>, <sep>, <alwaysPrintSep>], ... ]`
+ * @param filename {String} The filename to which to write the output. If
+ *    not set, then emit to stdout.
+ * @param headers {String} The HTTP header block string, if any, to emit
+ *    first.
+ * @param opts {Object} Parsed tool options.
+ */
+function printDatasets(datasets, filename, headers, opts) {
+  var isTTY = (filename ? false : process.stdout.isTTY)
+  var write = emit;
+  if (filename) {
+    var tmpPath = path.resolve(path.dirname(filename),
+      format('.%s-json-%s-%s.tmp', path.basename(filename), process.pid,
+             Date.now()));
+    var stats = fs.statSync(filename);
+    var f = fs.createWriteStream(tmpPath,
+      {encoding: 'utf8', mode: stats.mode});
+    write = f.write.bind(f);
+  }
+  if (headers && headers.length > 0) {
+    write(headers)
+  }
+  for (var i = 0; i < datasets.length; i++) {
+    var dataset = datasets[i];
+    var output = stringifyDatum(dataset[0], opts, isTTY);
+    var sep = dataset[1];
+    if (output && output.length) {
+      write(output);
+      write(sep);
+    } else if (dataset[2]) {
+      write(sep);
+    }
+  }
+  if (filename) {
+    f.end();
+    fs.renameSync(tmpPath, filename);
+    if (! opts.quiet) {
+      warn('json: updated "%s" in-place', filename);
+    }
+  }
+}
+
 
 /**
- * Print out a single result, considering input options.
+ * Stringify the given datum according to the given output options.
  */
-function printDatum(datum, opts, sep, alwaysPrintSep) {
+function stringifyDatum(datum, opts, isTTY) {
   var output = null;
   switch (opts.outputMode) {
   case OM_INSPECT:
-    output = util.inspect(datum, false, Infinity, process.stdout.isTTY);
+    output = util.inspect(datum, false, Infinity, isTTY);
     break;
   case OM_JSON:
     if (typeof datum !== 'undefined') {
@@ -952,6 +1052,17 @@ function printDatum(datum, opts, sep, alwaysPrintSep) {
   default:
     throw new Error("unknown output mode: "+opts.outputMode);
   }
+  return output;
+}
+
+
+/**
+ * Print out a single result, considering input options.
+ *
+ * @deprecated
+ */
+function printDatum(datum, opts, sep, alwaysPrintSep) {
+  var output = stringifyDatum(datum, opts);
   if (output && output.length) {
     emit(output);
     emit(sep);
@@ -1034,6 +1145,40 @@ function main(argv) {
         return drainStdoutAndExit(1);
     });
     chunker.on('chunk', parseChunk);
+  } else if (opts.inPlace) {
+    assert.equal(opts.inputFiles.length, 1,
+      'cannot handle more than one file with -I');
+    getInput(opts, function (err, content, filename) {
+      if (err) {
+        warn("json: error: %s", err)
+        return drainStdoutAndExit(1);
+      }
+
+      // Take off a leading HTTP header if any and pass it through.
+      var headers = [];
+      while (true) {
+        if (content.slice(0,5) === "HTTP/") {
+          var index = content.indexOf('\r\n\r\n');
+          var sepLen = 4;
+          if (index == -1) {
+            index = content.indexOf('\n\n');
+            sepLen = 2;
+          }
+          if (index != -1) {
+            if (! opts.dropHeaders) {
+              headers.push(content.slice(0, index+sepLen));
+            }
+            var is100Continue = (content.slice(0, 21) === "HTTP/1.1 100 Continue");
+            content = content.slice(index+sepLen);
+            if (is100Continue) {
+              continue;
+            }
+          }
+        }
+        break;
+      }
+      parseChunk(content, undefined, filename, headers.join(''));
+    });
   } else {
     // not streaming
     getInput(opts, function (err, buffer) {
@@ -1068,14 +1213,17 @@ function main(argv) {
   }
 
   /**
-   * Parse a single chunk of JSON. When not streaming, this will just be
-   * called once.
+   * Parse a single chunk of JSON. This may be called more than once
+   * (when streaming or when operating on multiple files).
    *
    * @param chunk {String} The JSON-encoded string.
    * @param obj {Object} Optional. For some code paths while streaming `obj`
    *    will be provided. This is an already parsed JSON object.
+   * @param filename {String} Optional. The filename from which this content
+   *    came, if relevant. This is only set if `opts.inPlace`.
+   * @param headers {String} Optional. Leading HTTP headers, if any to emit.
    */
-  function parseChunk(chunk, obj) {
+  function parseChunk(chunk, obj, filename, headers) {
     // Expect the chunk to be JSON.
     if (! chunk.length) {
       return;
@@ -1254,6 +1402,7 @@ function main(argv) {
     }
 
     // Output
+    var datasets = [];
     if (opts.outputMode === OM_JSON) {
       if (lookups.length === 1 && !opts.array) {
         // Special case: For JSON output of a *single* lookup, *don't* use
@@ -1280,31 +1429,32 @@ function main(argv) {
       }
       // If JSON output mode, then always just output full set of data to
       // ensure valid JSON output.
-      printDatum(data, opts, '\n', false);
+      datasets.push([data, '\n', false]);
     } else if (lookups.length) {
       if (opts.array) {
         // Output `data` as a "table" of lookup results.
         for (j = 0; j < data.length; j++) {
           var row = data[j];
           for (i = 0; i < lookups.length-1; i++) {
-            printDatum(row[lookups[i].join('.')], opts, opts.delim, true);
+            datasets.push([row[lookups[i].join('.')], opts.delim, true]);
           }
-          printDatum(row[lookups[i].join('.')], opts, '\n', true);
+          datasets.push([row[lookups[i].join('.')], '\n', true]);
         }
       } else {
         for (i = 0; i < lookups.length; i++) {
-          printDatum(data[lookups[i].join('.')], opts, '\n', false);
+          datasets.push([data[lookups[i].join('.')], '\n', false]);
         }
       }
     } else if (opts.array) {
       if (!Array.isArray(data)) data = [data];
       for (j = 0; j < data.length; j++) {
-        printDatum(data[j], opts, '\n', false);
+        datasets.push([data[j], '\n', false]);
       }
     } else {
       // Output `data` as is.
-      printDatum(data, opts, '\n', false);
+      datasets.push([data, '\n', false]);
     }
+    printDatasets(datasets, filename, headers, opts);
   }
 }
 
